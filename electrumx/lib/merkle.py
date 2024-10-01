@@ -24,6 +24,7 @@
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 # and warranty status of this software.
 
+
 '''Merkle trees, branches, proofs and roots.'''
 
 from math import ceil, log
@@ -81,7 +82,7 @@ class Merkle(object):
                 hashes.append(hashes[-1])
 
                 # Asterix used in place of "duplicated" hashes in TSC format (derivable by client)
-                is_last_node_in_level = (index ^ 1 == len(hashes)-1)
+                is_last_node_in_level = (index ^ 1 == len(hashes) - 1)
                 if tsc_format and is_last_node_in_level:
                     branch.append(b"*")
                 else:
@@ -109,7 +110,7 @@ class Merkle(object):
 
         The caller should have confirmed the length of the branch with
         branch_length().  Unfortunately this is not easily done for
-        bitcoin transactions as the number of transactions in a block
+        Radiant transactions as the number of transactions in a block
         is unknown to an SPV client.
         '''
         hash_func = self.hash_func
