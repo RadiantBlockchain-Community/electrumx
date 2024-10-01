@@ -6,6 +6,8 @@
 # See the file "LICENCE" for information about the copyright
 # and warranty status of this software.
 
+
+
 '''Block prefetcher and chain processor.'''
 
 
@@ -108,7 +110,7 @@ class Prefetcher:
                 cache_room = max(self.min_cache_size // self.ave_size, 1)
                 count = min(daemon_height - self.fetched_height, cache_room)
                 # Don't make too large a request
-                count = min(self.coin.max_fetch_blocks(first), max(count, 0))
+                count = min(self.coin.prefetch_limit(first), max(count, 0))
                 if not count:
                     self.caught_up = True
                     return False
@@ -575,8 +577,8 @@ class BlockProcessor:
     That's 60 bytes of raw data in-memory.  Python dictionary overhead
     means each entry actually uses about 205 bytes of memory.  So
     almost 5 million UTXOs can fit in 1GB of RAM.  There are
-    approximately 42 million UTXOs on bitcoin mainnet at height
-    433,000.
+    approximately 3 million UTXOs on Radiant mainnet at height
+    241,283.
 
     Semantics:
 
