@@ -4,7 +4,6 @@
 #
 # See the file "LICENCE" for information about the copyright
 # and warranty status of this software.
-
 '''Class for handling asynchronous connections to a blockchain
 daemon.'''
 
