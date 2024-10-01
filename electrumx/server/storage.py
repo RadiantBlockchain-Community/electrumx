@@ -10,11 +10,15 @@
 import os
 from functools import partial
 
+import pytest
+
 from electrumx.lib import util
 
 
 def db_class(name):
     '''Returns a DB engine class.'''
+    if name == "skip":
+        raise pytest.skip()
     for db_class_ in util.subclasses(Storage):
         if db_class_.__name__.lower() == name.lower():
             db_class_.import_module()
@@ -67,15 +71,13 @@ class Storage(object):
         '''
         raise NotImplementedError
 
-# pylint:disable=W0223
-
 
 class LevelDB(Storage):
     '''LevelDB database engine.'''
 
     @classmethod
     def import_module(cls):
-        import plyvel    # pylint:disable=E0401
+        import plyvel
         cls.module = plyvel
 
     def open(self, name, create):
@@ -91,9 +93,6 @@ class LevelDB(Storage):
                                    sync=True)
 
 
-# pylint:disable=E1101
-
-
 class RocksDB(Storage):
     '''RocksDB database engine.'''
 
@@ -103,7 +102,7 @@ class RocksDB(Storage):
 
     @classmethod
     def import_module(cls):
-        import rocksdb    # pylint:disable=E0401
+        import rocksdb
         cls.module = rocksdb
 
     def open(self, name, create):
