@@ -12,7 +12,6 @@ import asyncio
 import itertools
 import json
 import time
-
 import aiohttp
 from aiorpcx import run_in_thread
 
