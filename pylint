@@ -1,1 +1,1 @@
-pylint --rcfile=.pylintrc electrumx/server/*.py electrumx/lib/*.py *.py
+flake8 electrumx/server/*.py electrumx/lib/*.py *.py
