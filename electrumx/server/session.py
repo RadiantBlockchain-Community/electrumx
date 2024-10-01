@@ -22,12 +22,8 @@ import attr
 from aiorpcx import (
     RPCSession, JSONRPCAutoDetect, JSONRPCConnection, serve_rs, serve_ws, NewlineFramer,
     TaskGroup, handler_invocation, RPCError, Request, sleep, Event, ReplyAndDisconnect,
-    timeout_after
+    TaskTimeout, timeout_after
 )
-from electrumx.lib.util import (
-    pack_le_uint32
-)
-
 import pylru
 
 import electrumx
@@ -36,7 +32,6 @@ from electrumx.lib.text import sessions_lines
 from electrumx.lib import util
 from electrumx.lib.hash import (sha256, hash_to_hex_str, hex_str_to_hash, HASHX_LEN, Base58Error,
                                 double_sha256)
-from electrumx.lib.util import hex_to_bytes
 from electrumx.server.daemon import DaemonError
 from electrumx.server.peers import PeerManager
 
@@ -88,19 +83,15 @@ def assert_tx_hash(value):
         pass
     raise RPCError(BAD_REQUEST, f'{value} should be a transaction hash')
 
-def assert_ref(value):
-    '''Raise an RPCError if the value is not a valid hexadecimal ref.
 
-    If it is valid, return it as 36-byte binary ref.
-    '''
+def assert_raw_bytes(value):
+    '''Raise an RPCError if the value is not valid raw bytes (in hex).'''
     try:
-        raw_ref = hex_str_to_hash(value[:64]) + hex_str_to_hash(value[64:])
-        if len(raw_ref) == 36:
-            return raw_ref
-
+        return bytes.fromhex(value)
     except (ValueError, TypeError):
         pass
-    raise RPCError(BAD_REQUEST, f'{value} should be a ref')
+    raise RPCError(BAD_REQUEST, f'argument should be hex-encoded bytes')
+
 
 
 @attr.s(slots=True)
@@ -150,9 +141,6 @@ class SessionManager:
         self._history_cache = pylru.lrucache(1000)
         self._history_lookups = 0
         self._history_hits = 0
-        self._first_last_history_cache = pylru.lrucache(1000)
-        self._first_last_history_lookups = 0
-        self._first_last_history_hits = 0
         self._tx_hashes_cache = pylru.lrucache(1000)
         self._tx_hashes_lookups = 0
         self._tx_hashes_hits = 0
@@ -192,9 +180,7 @@ class SessionManager:
                 session_class = self.env.coin.SESSIONCLS
             if service.protocol in ('ws', 'wss'):
                 serve = serve_ws
-            # elif service.protocol in ('http', 'https'):
-            #    serve = serve_http
-            else: 
+            else:
                 serve = serve_rs
             # FIXME: pass the service not the kind
             session_factory = partial(session_class, self, self.db, self.mempool,
@@ -321,7 +307,7 @@ class SessionManager:
             'coin': self.env.coin.__name__,
             'daemon': self.daemon.logged_url(),
             'daemon height': self.daemon.cached_height(),
-            'db height': self.db.db_height,
+            'db height': self.db.state.height,
             'db_flush_count': self.db.history.flush_count,
             'groups': len(self.session_groups),
             'history cache': cache_fmt.format(
@@ -543,14 +529,6 @@ class SessionManager:
                 lines.append(f'Address: {arg}')
                 return hashX
             except Base58Error:
-                pass
-
-            try:
-                script = coin.build_name_index_script(arg.encode("ascii"))
-                hashX = coin.name_hashX_from_script(script)
-                lines.append(f'Name: {arg}')
-                return hashX
-            except (AttributeError, UnicodeEncodeError):
                 pass
 
             return None
@@ -861,24 +839,6 @@ class SessionManager:
             raise result
         return result, cost
 
-    async def first_last_history(self, hashX):
-        '''Returns the first and last history entries for a hashX'''
-        cost = 0.1
-        self._first_last_history_lookups += 1
-        try:
-            result = self._first_last_history_cache[hashX]
-            self._first_last_history_hits += 1
-        except KeyError:
-            first = await self.db.limited_history(hashX, limit=1)
-            last = await self.db.limited_history(hashX, limit=1, reverse=True)
-            cost += 0.202
-            result = first + last
-            self._first_last_history_cache[hashX] = result
-
-        if isinstance(result, Exception):
-            raise result
-        return result, cost
-
     async def _notify_sessions(self, height, touched):
         '''Notify sessions about height changes and touched addresses.'''
         height_changed = height != self.notified_height
@@ -886,9 +846,6 @@ class SessionManager:
             await self._refresh_hsub_results(height)
             # Invalidate our history cache for touched hashXs
             cache = self._history_cache
-            for hashX in set(cache).intersection(touched):
-                del cache[hashX]
-            cache = self._first_last_history_cache
             for hashX in set(cache).intersection(touched):
                 del cache[hashX]
 
@@ -1107,7 +1064,10 @@ class ElectrumX(SessionBase):
         try:
             async with timeout_after(30):
                 await self._notify_inner(touched, height_changed)
-        except Exception:   # pylint:disable=W0703
+        except TaskTimeout:
+            self.logger.warning('timeout notifying client, closing...')
+            await self.close(force_after=1.0)
+        except Exception:
             self.logger.exception('unexpected exception notifying client')
 
     async def _notify_inner(self, touched, height_changed):
@@ -1208,15 +1168,6 @@ class ElectrumX(SessionBase):
             self.unsubscribe_hashX(hashX)
             return None
 
-    def get_refs_by_outpoint(self, outpoint):
-        '''Get refs by the outpoint
-        '''
-        refs = self.mempool.get_refs_by_outpoint(outpoint)
-        if len(refs):
-            return refs
-        # Not found in the mempool, check the database
-        return self.db.get_refs_by_outpoint(outpoint)
-
     async def hashX_listunspent(self, hashX):
         '''Return the list of UTXOs of a script hash, including mempool
         effects.'''
@@ -1228,31 +1179,10 @@ class ElectrumX(SessionBase):
 
         return [{'tx_hash': hash_to_hex_str(utxo.tx_hash),
                  'tx_pos': utxo.tx_pos,
-                 'height': utxo.height, 'value': utxo.value, 
-                 'refs': self.get_refs_by_outpoint(utxo.tx_hash + pack_le_uint32(utxo.tx_pos))}
+                 'height': utxo.height, 'value': utxo.value}
                 for utxo in utxos
                 if (utxo.tx_hash, utxo.tx_pos) not in spends]
 
-    async def codescripthash_listunspent(self, codeScriptHash):
-        '''Return the list of UTXOs of a code script hash, including mempool
-        effects.'''
-        hashX = hex_to_bytes(codeScriptHash)
-        utxos = await self.db.codescripthash_all_utxos(hashX)
-        utxos = sorted(utxos)
-        # the following codescripthash_unordered_UTXOs is not implemented yet
-        # Need a way to track codescripthash and hashX together
-        utxos.extend(await self.mempool.codescripthash_unordered_UTXOs(hashX))
-        self.bump_cost(1.0 + len(utxos) / 50)
-         # the following codescripthash_potential_spends is not implemented yet either
-        spends = await self.mempool.codescripthash_potential_spends(hashX)
-
-        return [{'tx_hash': hash_to_hex_str(utxo.tx_hash),
-                 'tx_pos': utxo.tx_pos,
-                 'height': utxo.height, 'value': utxo.value, 
-                 'refs': self.get_refs_by_outpoint(utxo.tx_hash + pack_le_uint32(utxo.tx_pos))}
-                for utxo in utxos
-                if (utxo.tx_hash, utxo.tx_pos) not in spends]
-    
     async def hashX_subscribe(self, hashX, alias):
         # Store the subscription only after address_status succeeds
         result = await self.address_status(hashX)
@@ -1318,7 +1248,7 @@ class ElectrumX(SessionBase):
         return self.unsubscribe_hashX(hashX) is not None
 
     async def _merkle_proof(self, cp_height, height):
-        max_height = self.db.db_height
+        max_height = self.db.state.height
         if not height <= cp_height <= max_height:
             raise RPCError(BAD_REQUEST,
                            f'require header height {height:,d} <= '
@@ -1479,13 +1409,14 @@ class ElectrumX(SessionBase):
         '''Broadcast a raw transaction to the network.
 
         raw_tx: the raw transaction as a hexadecimal string'''
+        assert_raw_bytes(raw_tx)
         self.bump_cost(0.25 + len(raw_tx) / 5000)
         # This returns errors as JSON RPC errors, as is natural
         try:
             hex_hash = await self.session_mgr.broadcast_transaction(raw_tx)
         except DaemonError as e:
             error, = e.args
-            message = error['message']   # pylint:disable=E1126
+            message = error['message']
             self.logger.info(f'error sending transaction: {message}')
             raise RPCError(BAD_REQUEST, 'the transaction was rejected by '
                            f'network rules.\n\n{message}\n[{raw_tx}]') from None
@@ -1523,22 +1454,32 @@ class ElectrumX(SessionBase):
 
         return {"block_height": height, "merkle": branch, "pos": tx_pos}
 
-    async def ref_get(self, ref, verbose = False):
-        '''Return the first and last transactions for a singleton ref or a normal ref mint'''
-        ref = assert_ref(ref)
-        ref_hash = self.env.coin.hashX_from_script(ref)
-        history, cost = await self.session_mgr.first_last_history(ref_hash)
+    async def transaction_tsc_merkle(self, tx_hash, height, txid_or_tx='txid',
+                                     target_type='block_hash'):
+        '''Return the TSC merkle proof in JSON format to a confirmed transaction given its hash.
+        See: https://tsc.RadiantCommunity.net/standards/merkle-proof-standardised-format/.
+
+        tx_hash: the transaction hash as a hexadecimal string
+        include_tx: whether to include the full raw transaction in the response or txid.
+        target: options include: ('merkle_root', 'block_header', 'block_hash', 'None')
+        '''
+        tx_hash = assert_tx_hash(tx_hash)
+        height = non_negative_integer(height)
+
+        tsc_proof, cost = await self.session_mgr.tsc_merkle_proof_for_tx_hash(
+            height, tx_hash, txid_or_tx, target_type)
         self.bump_cost(cost)
-        conf = [{'tx_hash': hash_to_hex_str(tx_hash), 'height': height}
-                for tx_hash, height in history]
 
-        unconf = [{'tx_hash': hash_to_hex_str(tx.hash),
-                   'height': -tx.has_unconfirmed_inputs,
-                   'fee': tx.fee}
-                  for tx in await self.mempool.first_last_summaries(ref_hash)]
-        self.bump_cost(0.25 + len(unconf) / 50)
+        return {
+            "index": tsc_proof['index'],
+            "txOrId": tsc_proof['txid_or_tx'],
+            "target": tsc_proof['target'],
+            "nodes": tsc_proof['nodes'],  # "*" is used to represent duplicated hashes
+            "targetType": target_type,
+            "proofType": "branch",  # "tree" option is not supported by ElectrumX
+            "composite": False  # composite option is not supported by ElectrumX
+        }
 
-        return conf + unconf
     async def transaction_id_from_pos(self, height, tx_pos, merkle=False):
         '''Return the txid and optionally a merkle proof, given
         a block height and position in the block.
@@ -1585,8 +1526,8 @@ class ElectrumX(SessionBase):
             'blockchain.transaction.broadcast': self.transaction_broadcast,
             'blockchain.transaction.get': self.transaction_get,
             'blockchain.transaction.get_merkle': self.transaction_merkle,
+            'blockchain.transaction.get_tsc_merkle': self.transaction_tsc_merkle,
             'blockchain.transaction.id_from_pos': self.transaction_id_from_pos,
-            'blockchain.ref.get': self.ref_get,
             'mempool.get_fee_histogram': self.compact_fee_histogram,
             'server.add_peer': self.add_peer,
             'server.banner': self.banner,
@@ -1601,6 +1542,7 @@ class ElectrumX(SessionBase):
             handlers['blockchain.scripthash.unsubscribe'] = self.scripthash_unsubscribe
 
         self.request_handlers = handlers
+
 
 class LocalRPC(SessionBase):
     '''A local TCP RPC server session.'''
