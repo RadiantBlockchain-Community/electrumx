@@ -6,6 +6,8 @@
 # See the file "LICENCE" for information about the copyright
 # and warranty status of this software.
 
+
+
 '''History by script hash (address).'''
 
 import array
@@ -201,6 +203,7 @@ class History(object):
                 tx_num, = unpack_le_uint64(tx_numb + bytes(3))
                 yield tx_num
                 limit -= 1
+
 
     #
     # History compaction
