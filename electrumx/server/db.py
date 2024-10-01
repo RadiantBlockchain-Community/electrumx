@@ -6,6 +6,8 @@
 # See the file "LICENCE" for information about the copyright
 # and warranty status of this software.
 
+
+
 '''Interface to the blockchain database.'''
 
 
@@ -752,22 +754,24 @@ class DB(object):
             for each prevout.
             '''
             def lookup_hashX(tx_hash, tx_idx):
-                idx_packed = pack_le_uint32(tx_idx)
+             idx_packed = pack_le_uint32(tx_idx)  # Pack the index as a little-endian uint32
 
-                # Key: b'h' + compressed_tx_hash + tx_idx + tx_num
-                # Value: hashX
-                prefix = b'h' + tx_hash[:4] + idx_packed
+             # Key: b'h' + compressed_tx_hash + tx_idx + tx_num
+             prefix = b'h' + tx_hash[:4] + idx_packed  # Create a key prefix for the database lookup
 
-                # Find which entry, if any, the TX_HASH matches.
-                for db_key, hashX_with_codescripthash in self.utxo_db.iterator(prefix=prefix):
-                    hashX = hashX_with_codescripthash[:HASHX_LEN]
-                    tx_num_packed = db_key[-5:]
-                    tx_num, = unpack_le_uint64(tx_num_packed + bytes(3))
-                    fs_hash, _height = self.fs_tx_hash(tx_num)
-                    if fs_hash == tx_hash:
-                        return hashX, idx_packed + tx_num_packed
-                return None, None
-            return [lookup_hashX(*prevout) for prevout in prevouts]
+            # Find which entry, if any, the TX_HASH matches.
+             for db_key, hashX_with_codescripthash in self.utxo_db.iterator(prefix=prefix):
+                hashX = hashX_with_codescripthash[:HASHX_LEN]  # Extract the hashX from the retrieved value
+                tx_num_packed = db_key[-5:]  # Extract the last 5 bytes from the key for transaction number
+                tx_num, = unpack_le_uint64(tx_num_packed + bytes(3))  # Unpack the transaction number
+
+                fs_hash, _height = self.fs_tx_hash(tx_num)  # Get the full transaction hash and height
+
+                if fs_hash == tx_hash:  # Check if the retrieved hash matches the original tx_hash
+                   return hashX, idx_packed + tx_num_packed  # Return the hashX and packed index with tx_num
+
+        return None, None  # If no match is found, return None
+
 
         def lookup_utxos(hashX_pairs):
             def lookup_utxo(hashX, suffix):
