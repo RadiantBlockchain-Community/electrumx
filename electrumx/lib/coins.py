@@ -24,29 +24,35 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+
+
 '''Module providing coin abstraction.
 
 Anything coin-specific should go in this file and be subclassed where
 necessary for appropriate handling.
 '''
 
-from collections import namedtuple
 import re
 from decimal import Decimal
 from hashlib import sha256
+from collections import namedtuple
 
 from electrumx.lib import util
-from electrumx.lib.hash import Base58, double_sha256, double_sha512_256, hash_to_hex_str
+from electrumx.lib.hash import Base58, double_sha256
+from electrumx.lib.hash import HASHX_LEN
+from electrumx.lib.script import ScriptPubKey
+from electrumx.server.session import ElectrumX
+
+from electrumx.lib import util
 from electrumx.lib.hash import HASHX_LEN
 from electrumx.lib.script import ScriptPubKey, Script
 import electrumx.lib.tx as lib_tx
 import electrumx.server.block_processor as block_proc
 from electrumx.server import daemon
 from electrumx.server.session import ElectrumX
-
+from electrumx.lib.hash import Base58, double_sha512_256, hash_to_hex_str
 
 Block = namedtuple("Block", "raw header transactions")
-
 
 class CoinError(Exception):
     '''Exception raised for coin-related errors.'''
@@ -62,10 +68,11 @@ class Coin:
     RPC_URL_REGEX = re.compile('.+@(\\[[0-9a-fA-F:]+\\]|[^:]+)(:[0-9]+)?')
     VALUE_PER_COIN = 100000000
     SESSIONCLS = ElectrumX
-    DEFAULT_MAX_SEND = 10000000
-    DESERIALIZER = lib_tx.Deserializer
     DAEMON = daemon.Daemon
+    DESERIALIZER = lib_tx.Deserializer
     BLOCK_PROCESSOR = block_proc.BlockProcessor
+
+    DEFAULT_MAX_SEND = 1000000
     P2PKH_VERBYTE = bytes.fromhex("00")
     P2SH_VERBYTES = [bytes.fromhex("05")]
     RPC_PORT = 7332
@@ -81,10 +88,9 @@ class Coin:
         '''Return a coin class given name and network.
 
         Raise an exception if unrecognised.'''
-        req_attrs = ['TX_COUNT', 'TX_COUNT_HEIGHT', 'TX_PER_BLOCK']
+        req_attrs = ['TX_COUNT', 'TX_COUNT_HEIGHT', 'TX_PER_BLOCK']  # Correctly indented
         for coin in util.subclasses(Coin):
-            if (coin.NAME.lower() == name.lower() and
-                    coin.NET.lower() == net.lower()):
+            if coin.NAME.lower() == name.lower() and coin.NET.lower() == net.lower():
                 coin_req_attrs = req_attrs.copy()
                 missing = [attr for attr in coin_req_attrs
                            if not hasattr(coin, attr)]
@@ -109,11 +115,50 @@ class Coin:
         return url + '/'
 
     @classmethod
-    def max_fetch_blocks(cls, height):
-        if height < 130000:
-            return 1000
-        return 100
+    def hashX_from_script(cls, script):
+        '''Returns a hashX from a script.'''
+        return sha256(script).digest()[:HASHX_LEN]
 
+    @classmethod
+    def address_to_hashX(cls, address):
+        '''Return a hashX given a coin address.'''
+        return cls.hashX_from_script(cls.pay_to_address_script(address))
+
+    @classmethod
+    def hash160_to_P2PKH_script(cls, hash160):
+        return ScriptPubKey.P2PKH_script(hash160)
+
+    @classmethod
+    def hash160_to_P2PKH_hashX(cls, hash160):
+        return cls.hashX_from_script(cls.hash160_to_P2PKH_script(hash160))
+
+    @classmethod
+    def pay_to_address_script(cls, address):
+        '''Return a pubkey script that pays to a pubkey hash.
+
+        Pass the address (either P2PKH or P2SH) in base58 form.
+        '''
+        raw = Base58.decode_check(address)
+
+        # Require version byte(s) plus hash160.
+        verbyte = -1
+        verlen = len(raw) - 20
+        if verlen > 0:
+            verbyte, hash160 = raw[:verlen], raw[verlen:]
+
+        if verbyte == cls.P2PKH_VERBYTE:
+            return cls.hash160_to_P2PKH_script(hash160)
+        if verbyte in cls.P2SH_VERBYTES:
+            return ScriptPubKey.P2SH_script(hash160)
+
+        raise CoinError('invalid address: {}'.format(address))
+
+    @classmethod
+    def header_hash(cls, header):
+        '''Given a header return hash'''
+        return double_sha512_256(header)
+
+    
     @classmethod
     def genesis_block(cls, block):
         '''Check the Genesis block is the right one for this coin.
@@ -127,7 +172,26 @@ class Coin:
                             .format(header_hex_hash, cls.GENESIS_HASH))
 
         return header + bytes(1)
- 
+
+    @classmethod
+    def header_prevhash(cls, header):
+        '''Given a header return previous hash'''
+        return header[4:36]
+
+    @classmethod
+    def decimal_value(cls, value):
+        '''Return the number of standard coin units as a Decimal given a
+        quantity of smallest units.
+
+        For example 1 RXD is returned for 100 million photons.
+        '''
+        return Decimal(value) / cls.VALUE_PER_COIN
+
+    @classmethod
+    def prefetch_limit(cls, height):
+        if height <= 130_000:
+            return 10000
+        return 1000
     @classmethod
     def codeScriptHash_from_script(cls, script):
         '''Returns a codeScriptHash from a script.'''
@@ -195,7 +259,7 @@ class Coin:
         '''Return the number of standard coin units as a Decimal given a
         quantity of smallest units.
 
-        For example 1 BSV is returned for 100 million satoshis.
+        For example 1 RXD is returned for 100 million photons.
         '''
         return Decimal(value) / cls.VALUE_PER_COIN
 
@@ -210,6 +274,7 @@ class Radiant(Coin):
     GENESIS_ACTIVATION = 0
     RPC_PORT = 7332
 
+
 class RadiantTestnetMixin:
     SHORTNAME = "XTN"
     NET = "testnet"
@@ -219,65 +284,47 @@ class RadiantTestnetMixin:
     GENESIS_HASH = ('000000002008a2f4a76b850a838ae084'
                     '994c200dc2fd354f73102298fe063a91')
     REORG_LIMIT = 8000
-    TX_COUNT = 1
-    TX_COUNT_HEIGHT = 1
-    TX_PER_BLOCK = 21
+    CHAIN_SIZE = 6_968_422_047
+    CHAIN_SIZE_HEIGHT = 1_454_438
+    AVG_BLOCK_SIZE = 200_000
+
     RPC_PORT = 17332
     PEER_DEFAULT_PORTS = {'t': '51001', 's': '51002'}
 
+
 class RadiantTestnet(RadiantTestnetMixin, Coin):
     '''Radiant Testnet for Radiant daemons.'''
-    GENESIS_HASH = ('000000002008a2f4a76b850a838ae084'
-                    '994c200dc2fd354f73102298fe063a91')
-    NAME = "RadiantTestnet"
+    NAME = "Radiant"
     PEERS = [
+        'electrumx.radiant4people.com t51001 s51002',
     ]
     GENESIS_ACTIVATION = 0
-    RPC_PORT = 17332 
 
-class RadiantTestnet4(RadiantTestnetMixin, Coin):
-    '''Radiant Testnet4 for Radiant daemons.'''
-    GENESIS_HASH = ('000000000d8ada264d16f87a590b2af3'
-                    '20cd3c7e3f9be5482163e830fd00aca2')
-    NAME = "RadiantTestnet4"
-    PEERS = [
-    ]
-    GENESIS_ACTIVATION = 0
-    RPC_PORT = 27332 
-# 
+
 class RadiantScalingTestnet(RadiantTestnet):
     NET = "scalingtest"
-    GENESIS_HASH = ('00000000ea7340a6e9ae28ad8ca95a65'
-                    '2c8da00ee7ea97e6cb42cd1558884c87')
     PEERS = [
+        'stn-electrumx.radiant4people.com t51001 s51002',
     ]
-    TX_COUNT = 1000
-    TX_COUNT_HEIGHT = 1000
-    TX_PER_BLOCK = 5000
+    CHAIN_SIZE = 20_000
+    CHAIN_SIZE_HEIGHT = 100
+    AVG_BLOCK_SIZE = 2_000_000_000
     GENESIS_ACTIVATION = 0
-    RPC_PORT = 37332 
 
     @classmethod
-    def max_fetch_blocks(cls, height):
-        if height <= 10:
-            return 100
-        return 3
+    def prefetch_limit(cls, height):
+        return 8
+
 
 class RadiantRegtest(RadiantTestnet):
     NET = "regtest"
     GENESIS_HASH = ('000000002008a2f4a76b850a838ae084'
                     '994c200dc2fd354f73102298fe063a91')
     PEERS = []
-    TX_COUNT = 1
-    TX_COUNT_HEIGHT = 1
+    CHAIN_SIZE = 20_000
+    CHAIN_SIZE_HEIGHT = 100
+    AVG_BLOCK_SIZE = 1_000_000
     GENESIS_ACTIVATION = 0
-    RPC_PORT = 17443
 
-class Radiant(Coin):
-    NAME = "Radiant"
-    TX_COUNT = 1000
-    TX_COUNT_HEIGHT = 2000
-    TX_PER_BLOCK = 10
-    PEERS = [
-    ]
-    GENESIS_ACTIVATION = 0
+
+Radiant = Radiant
