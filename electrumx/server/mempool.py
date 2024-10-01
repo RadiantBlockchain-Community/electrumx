@@ -16,9 +16,10 @@ import attr
 from aiorpcx import TaskGroup, run_in_thread, sleep
 
 from electrumx.lib.hash import hash_to_hex_str, hex_str_to_hash
-from electrumx.lib.util import class_logger, chunks, pack_le_uint32, unpack_le_uint32_from
-from electrumx.lib.script import Script
+from electrumx.lib.util import class_logger, chunks
 from electrumx.server.db import UTXO
+from electrumx.lib.script import Script
+from electrumx.lib.util import class_logger, chunks, pack_le_uint32, unpack_le_uint32_from
 
 
 @attr.s(slots=True)
@@ -49,11 +50,11 @@ class MemPoolAPI(ABC):
 
     @abstractmethod
     async def height(self):
-        '''Query bitcoind for its height.'''
+        '''Query Radiantd for its height.'''
 
     @abstractmethod
     def cached_height(self):
-        '''Return the height of bitcoind the last time it was queried,
+        '''Return the height of Radiantd the last time it was queried,
         for any reason, without actually querying it.
         '''
 
@@ -63,12 +64,12 @@ class MemPoolAPI(ABC):
 
     @abstractmethod
     async def mempool_hashes(self):
-        '''Query bitcoind for the hashes of all transactions in its
+        '''Query Radiantd for the hashes of all transactions in its
         mempool, returned as a list.'''
 
     @abstractmethod
     async def raw_transactions(self, hex_hashes):
-        '''Query bitcoind for the serialized raw transactions with the given
+        '''Query Radiantd for the serialized raw transactions with the given
         hashes.  Missing transactions are returned as None.
 
         hex_hashes is an iterable of hexadecimal hash strings.'''
@@ -108,7 +109,7 @@ class MemPool(object):
         self.api = api
         self.logger = class_logger(__name__, self.__class__.__name__)
         self.txs = {}
-        self.hashXs = defaultdict(set)              # None can be a key
+        self.hashXs = defaultdict(set)  # None can be a key
         self.outpointToRefs = defaultdict(set)      # None can be a key
         self.codeScriptHashes = defaultdict(set)    # None can be a key
         self.srefs = defaultdict(list) # Ordered list to keep track of first and last srefs transactions
@@ -117,6 +118,12 @@ class MemPool(object):
 
     async def _logging(self, synchronized_event):
         '''Print regular logs of mempool stats.'''
+        def fmt_amt(amount):
+            whole, frac = divmod(amount, 100_000_000)
+            frac = f'{frac:08}'.rstrip('0') or '0'
+            frac = f'{frac:8}'
+            return f'{whole:,d}.{frac} RXD'
+
         self.logger.info('beginning processing of daemon mempool.  '
                          'This can take some time...')
         start = time.monotonic()
@@ -125,9 +132,10 @@ class MemPool(object):
         self.logger.info(f'synced in {elapsed:.2f}s')
         while True:
             mempool_size = sum(tx.size for tx in self.txs.values()) / 1_000_000
+           
             self.logger.info(f'{len(self.txs):,d} txs {mempool_size:.2f} MB '
                              f'touching {len(self.hashXs):,d} addresses')
-            await sleep(self.log_status_secs)
+            await sleep(self.log_status_secs) 
             await synchronized_event.wait()
 
     def _accept_transactions(self, tx_map, utxo_map, touched):
@@ -363,34 +371,6 @@ class MemPool(object):
     # External interface
     #
 
-    def get_refs_by_outpoint(self, outpoint):
-        # Format outpoint to a string utility function
-        def outpoint_to_str(outpoint):
-            num, = unpack_le_uint32_from(outpoint[32:])
-            return f'{hash_to_hex_str(outpoint[:32])}i{num}'
-        
-        # Get from cache if present
-        value = self.outpointToRefs.get(outpoint, None)
-        if not value:
-            return []
-    
-        refs = []
-        for x in range(0, len(value), 37):
-            ref_id = outpoint_to_str(value[x : x + 36])
-            type_byte = value[x + 36: x + 37]
-            ref_type = 'normal'
-            if type_byte == (0).to_bytes(1, "little"):
-                ref_type = 'normal'
-            elif type_byte == (1).to_bytes(1, "little"):
-                ref_type = 'single'
-            else: 
-                raise IndexError(f'fatal unexpected ref type byte')
-            refs.append({
-                'ref': ref_id,
-                'type': ref_type
-            })
-        return refs
-    
     async def keep_synchronized(self, synchronized_event):
         '''Keep the mempool synchronized with the daemon.'''
         async with TaskGroup() as group:
@@ -427,17 +407,6 @@ class MemPool(object):
             result.update(tx.prevouts)
         return result
 
-    async def codescripthash_potential_spends(self, codeScriptHash):
-        '''Return a set of (prev_hash, prev_idx) pairs from mempool
-        transactions that touch codeScriptHash.
-
-        None, some or all of these may be spends of the codeScriptHash, but all
-        actual spends of it (in the DB or mempool) will be included.
-        '''
-        result = set()
-        # Not implemented yet either
-        return result
-    
     async def transaction_summaries(self, hashX):
         '''Return a list of MemPoolTxSummary objects for the hashX.'''
         result = []
@@ -461,22 +430,3 @@ class MemPool(object):
                 if hX == hashX:
                     utxos.append(UTXO(-1, pos, tx_hash, 0, value))
         return utxos
-    
-    async def codescripthash_unordered_UTXOs(self, codeScriptHash):
-        # todo: this should be implemented for the codeScripthash
-        return []
-
-    async def first_last_summaries(self, hashX):
-        '''Return first and last UTXO tuples from mempool transactions that contain a singleton ref hash.'''
-        tx_hashes = self.srefs.get(hashX, [])
-        if not tx_hashes:
-            return []
-
-        result = []
-        # Get first and last, remove duplicate if there is only 1
-        for tx_hash in list(dict.fromkeys([tx_hashes[0], tx_hashes[-1]])):
-            tx = self.txs[tx_hash]
-            has_ui = any(hash in self.txs for hash, idx in tx.prevouts)
-            result.append(MemPoolTxSummary(tx_hash, tx.fee, has_ui))
-
-        return result
