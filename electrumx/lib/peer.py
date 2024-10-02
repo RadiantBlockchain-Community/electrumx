@@ -23,8 +23,6 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
-
 '''Representation of a peer server.'''
 
 from ipaddress import ip_address, IPv4Address, IPv6Address, IPv4Network, IPv6Network
