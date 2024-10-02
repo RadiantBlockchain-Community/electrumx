@@ -24,7 +24,6 @@
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 # and warranty status of this software.
 
-
 '''Merkle trees, branches, proofs and roots.'''
 
 from math import ceil, log
