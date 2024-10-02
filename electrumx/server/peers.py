@@ -363,7 +363,7 @@ class PeerManager:
         result = await session.send_request(message)
         assert_good(message, result, dict)
 
-        our_height = self.db.state.height
+        our_height = self.db.height
         their_height = result.get('height')
         if not isinstance(their_height, int):
             raise BadPeerError(f'invalid height {their_height}')
