@@ -11,12 +11,6 @@ Source: Python Cookbook, http://code.activestate.com/recipes/67107/
 '''
 
 
-'''An enum-like type with reverse lookup.
-
-Source: Python Cookbook, http://code.activestate.com/recipes/67107/
-'''
-
-
 class EnumError(Exception):
     pass
 
