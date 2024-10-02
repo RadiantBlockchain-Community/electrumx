@@ -645,7 +645,7 @@ class SessionManager:
             return 0
         return sum((group.cost() - session.cost) * group.weight for group in groups)
 
-    async def _merkle_branch(self, height, tx_hashes, tx_pos, tsc_format=False):
+    async def _merkle_branch(self, height, tx_hashes, tx_pos, bmm_format=False):
         tx_hash_count = len(tx_hashes)
         cost = tx_hash_count
 
@@ -663,12 +663,12 @@ class SessionManager:
                 self._merkle_cache[height] = merkle_cache
                 await merkle_cache.initialize(len(tx_hashes))
             branch, root = await merkle_cache.branch_and_root(tx_hash_count, tx_pos,
-                                                              tsc_format=tsc_format)
+                                                              bmm_format=bmm_format)
         else:
             branch, root = self.db.merkle.branch_and_root(tx_hashes, tx_pos,
-                                                          tsc_format=tsc_format)
+                                                          bmm_format=bmm_format)
 
-        if tsc_format:
+        if bmm_format:
             def converter(_hash):
                 if _hash == b"*":
                     return _hash.decode()
@@ -691,9 +691,9 @@ class SessionManager:
         branch, _root, merkle_cost = await self._merkle_branch(height, tx_hashes, tx_pos)
         return branch, tx_pos, tx_hashes_cost + merkle_cost
 
-    async def tsc_merkle_proof_for_tx_hash(self, height, tx_hash, txid_or_tx='txid',
+    async def bmm_merkle_proof_for_tx_hash(self, height, tx_hash, txid_or_tx='txid',
                                            target_type='block_hash'):
-        '''Return a pair (tsc_proof, cost) where tsc_proof is a dictionary with fields:
+        '''Return a pair (bmm_proof, cost) where bmm_proof is a dictionary with fields:
             index - the position of the transaction
             txOrId - either "txid" or "tx"
             target - either "block_hash", "block_header" or "merkle_root"
@@ -734,11 +734,11 @@ class SessionManager:
                 txid_or_tx_field = txid
             return txid_or_tx_field, cost
 
-        tsc_proof = {}
+        bmm_proof = {}
         tx_hashes, tx_hashes_cost = await self.tx_hashes_at_blockheight(height)
         tx_pos = get_tx_position(tx_hash)
         branch, root, merkle_cost = await self._merkle_branch(height, tx_hashes, tx_pos,
-                                                              tsc_format=True)
+                                                              bmm_format=True)
 
         target, root_from_header, header_cost = await get_target(target_type)
         # sanity check
@@ -748,11 +748,11 @@ class SessionManager:
 
         txid_or_tx_field, tx_fetch_cost = await get_txid_or_tx_field(tx_hash)
 
-        tsc_proof['index'] = tx_pos
-        tsc_proof['txid_or_tx'] = txid_or_tx_field
-        tsc_proof['target'] = target
-        tsc_proof['nodes'] = branch
-        return tsc_proof, tx_hashes_cost + merkle_cost + tx_fetch_cost + header_cost
+        bmm_proof['index'] = tx_pos
+        bmm_proof['txid_or_tx'] = txid_or_tx_field
+        bmm_proof['target'] = target
+        bmm_proof['nodes'] = branch
+        return bmm_proof, tx_hashes_cost + merkle_cost + tx_fetch_cost + header_cost
 
     async def merkle_branch_for_tx_pos(self, height, tx_pos):
         '''Return a triple (branch, tx_hash_hex, cost).'''
@@ -1248,7 +1248,7 @@ class ElectrumX(SessionBase):
         return self.unsubscribe_hashX(hashX) is not None
 
     async def _merkle_proof(self, cp_height, height):
-        max_height = self.db.state.height
+        max_height = self.db.height
         if not height <= cp_height <= max_height:
             raise RPCError(BAD_REQUEST,
                            f'require header height {height:,d} <= '
@@ -1454,10 +1454,10 @@ class ElectrumX(SessionBase):
 
         return {"block_height": height, "merkle": branch, "pos": tx_pos}
 
-    async def transaction_tsc_merkle(self, tx_hash, height, txid_or_tx='txid',
+    async def transaction_bmm_merkle(self, tx_hash, height, txid_or_tx='txid',
                                      target_type='block_hash'):
-        '''Return the TSC merkle proof in JSON format to a confirmed transaction given its hash.
-        See: https://tsc.RadiantCommunity.net/standards/merkle-proof-standardised-format/.
+        '''Return the BMM merkle proof in JSON format to a confirmed transaction given its hash.
+        See: https://bmm.RadiantCommunity.net/standards/merkle-proof-standardised-format/.
 
         tx_hash: the transaction hash as a hexadecimal string
         include_tx: whether to include the full raw transaction in the response or txid.
@@ -1466,15 +1466,15 @@ class ElectrumX(SessionBase):
         tx_hash = assert_tx_hash(tx_hash)
         height = non_negative_integer(height)
 
-        tsc_proof, cost = await self.session_mgr.tsc_merkle_proof_for_tx_hash(
+        bmm_proof, cost = await self.session_mgr.bmm_merkle_proof_for_tx_hash(
             height, tx_hash, txid_or_tx, target_type)
         self.bump_cost(cost)
 
         return {
-            "index": tsc_proof['index'],
-            "txOrId": tsc_proof['txid_or_tx'],
-            "target": tsc_proof['target'],
-            "nodes": tsc_proof['nodes'],  # "*" is used to represent duplicated hashes
+            "index": bmm_proof['index'],
+            "txOrId": bmm_proof['txid_or_tx'],
+            "target": bmm_proof['target'],
+            "nodes": bmm_proof['nodes'],  # "*" is used to represent duplicated hashes
             "targetType": target_type,
             "proofType": "branch",  # "tree" option is not supported by ElectrumX
             "composite": False  # composite option is not supported by ElectrumX
@@ -1526,7 +1526,7 @@ class ElectrumX(SessionBase):
             'blockchain.transaction.broadcast': self.transaction_broadcast,
             'blockchain.transaction.get': self.transaction_get,
             'blockchain.transaction.get_merkle': self.transaction_merkle,
-            'blockchain.transaction.get_tsc_merkle': self.transaction_tsc_merkle,
+            'blockchain.transaction.get_bmm_merkle': self.transaction_bmm_merkle,
             'blockchain.transaction.id_from_pos': self.transaction_id_from_pos,
             'mempool.get_fee_histogram': self.compact_fee_histogram,
             'server.add_peer': self.add_peer,
