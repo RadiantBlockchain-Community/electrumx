@@ -1,4 +1,6 @@
-# Copyright (c) 2017, Neil Booth
+# Copyright (c) 2022 The Radiant Blockchain Developers
+# Copyright (c) 2016-2017, Neil Booth
+# Copyright (c) 2017, the ElectrumX authors
 #
 # All rights reserved.
 #
@@ -22,314 +24,448 @@
 # LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-'''Representation of a peer server.'''
-
-from ipaddress import ip_address, IPv4Address, IPv6Address, IPv4Network, IPv6Network
-from socket import AF_INET, AF_INET6
-
-from aiorpcx import is_valid_hostname
-from electrumx.lib.util import cachedproperty, protocol_tuple, version_string
+# and warranty status of this software.
 
 
-class Peer(object):
 
-    # Protocol version
-    ATTRS = ('host', 'features',
-             # metadata
-             'source', 'ip_addr',
-             'last_good', 'last_try', 'try_count')
-    FEATURES = ('pruning', 'server_version', 'protocol_min', 'protocol_max',
-                'ssl_port', 'tcp_port')
-    # This should be set by the application
-    DEFAULT_PORTS = {}
 
-    def __init__(self, host, features, source='unknown', ip_addr=None,
-                 last_good=0, last_try=0, try_count=0):
-        '''Create a peer given a host name (or IP address as a string),
-        a dictionary of features, and a record of the source.'''
-        assert isinstance(host, str)
-        assert isinstance(features, dict)
-        assert host in features.get('hosts', {})
-        self.host = host
-        self.features = features.copy()
-        # Canonicalize / clean-up
-        for feature in self.FEATURES:
-            self.features[feature] = getattr(self, feature)
-        # Metadata
-        self.source = source
-        self.ip_addr = ip_addr
-        # last_good represents the last connection that was
-        # successful *and* successfully verified, at which point
-        # try_count is set to 0.  Failure to connect or failure to
-        # verify increment the try_count.
-        self.last_good = last_good
-        self.last_try = last_try
-        self.try_count = try_count
-        # Transient, non-persisted metadata
-        self.bad = False
-        self.other_port_pairs = set()
+'''Script-related classes and functions.'''
 
-    @classmethod
-    def peers_from_features(cls, features, source):
-        peers = []
-        if isinstance(features, dict):
-            hosts = features.get('hosts')
-            if isinstance(hosts, dict):
-                peers = [Peer(host, features, source=source)
-                         for host in hosts if isinstance(host, str)]
-        return peers
+from electrumx.lib.enum import Enumeration
+from electrumx.lib.util import unpack_le_uint16_from, unpack_le_uint32_from, \
+    pack_le_uint16, pack_le_uint32
 
-    @classmethod
-    def deserialize(cls, item):
-        '''Deserialize from a dictionary.'''
-        return cls(**item)
 
-    def matches(self, peers):
-        '''Return peers whose host matches our hostname or IP address.
-        Additionally include all peers whose IP address matches our
-        hostname if that is an IP address.
-        '''
-        candidates = (self.host.lower(), self.ip_addr)
-        return [peer for peer in peers
-                if peer.host.lower() in candidates
-                or peer.ip_addr == self.host]
+class ScriptError(Exception):
+    '''Exception used for script errors.'''
 
-    def __str__(self):
-        return self.host
 
-    def update_features(self, features):
-        '''Update features in-place.'''
-        try:
-            tmp = Peer(self.host, features)
-        except AssertionError:
-            pass
-        else:
-            self.update_features_from_peer(tmp)
+OpCodes = Enumeration("Opcodes", [
+    ("OP_0", 0), ("OP_PUSHDATA1", 76),
+    "OP_PUSHDATA2", "OP_PUSHDATA4", "OP_1NEGATE",
+    "OP_RESERVED",
+    "OP_1", "OP_2", "OP_3", "OP_4", "OP_5", "OP_6", "OP_7", "OP_8",
+    "OP_9", "OP_10", "OP_11", "OP_12", "OP_13", "OP_14", "OP_15", "OP_16",
+    "OP_NOP", "OP_VER", "OP_IF", "OP_NOTIF", "OP_VERIF", "OP_VERNOTIF",
+    "OP_ELSE", "OP_ENDIF", "OP_VERIFY", "OP_RETURN",
+    "OP_TOALTSTACK", "OP_FROMALTSTACK", "OP_2DROP", "OP_2DUP", "OP_3DUP",
+    "OP_2OVER", "OP_2ROT", "OP_2SWAP", "OP_IFDUP", "OP_DEPTH", "OP_DROP",
+    "OP_DUP", "OP_NIP", "OP_OVER", "OP_PICK", "OP_ROLL", "OP_ROT",
+    "OP_SWAP", "OP_TUCK",
+    "OP_CAT", "OP_SUBSTR", "OP_LEFT", "OP_RIGHT", "OP_SIZE",
+    "OP_INVERT", "OP_AND", "OP_OR", "OP_XOR", "OP_EQUAL", "OP_EQUALVERIFY",
+    "OP_RESERVED1", "OP_RESERVED2",
+    "OP_1ADD", "OP_1SUB", "OP_2MUL", "OP_2DIV", "OP_NEGATE", "OP_ABS",
+    "OP_NOT", "OP_0NOTEQUAL", "OP_ADD", "OP_SUB", "OP_MUL", "OP_DIV", "OP_MOD",
+    "OP_LSHIFT", "OP_RSHIFT", "OP_BOOLAND", "OP_BOOLOR", "OP_NUMEQUAL",
+    "OP_NUMEQUALVERIFY", "OP_NUMNOTEQUAL", "OP_LESSTHAN", "OP_GREATERTHAN",
+    "OP_LESSTHANOREQUAL", "OP_GREATERTHANOREQUAL", "OP_MIN", "OP_MAX",
+    "OP_WITHIN",
+    "OP_RIPEMD160", "OP_SHA1", "OP_SHA256", "OP_HASH160", "OP_HASH256",
+    "OP_CODESEPARATOR", "OP_CHECKSIG", "OP_CHECKSIGVERIFY", "OP_CHECKMULTISIG",
+    "OP_CHECKMULTISIGVERIFY",
+    "OP_NOP1",
+    "OP_CHECKLOCKTIMEVERIFY", "OP_CHECKSEQUENCEVERIFY",
 
-    def update_features_from_peer(self, peer):
-        if peer != self:
-            self.features = peer.features
-            for feature in self.FEATURES:
-                setattr(self, feature, getattr(peer, feature))
+    ("OP_CHECKDATASIG", 186), 
+    ("OP_CHECKDATASIGVERIFY", 187), 
+    ("OP_REVERSEBYTES", 188), 
+    
+    ("OP_STATESEPERATOR", 189), 
+    ("OP_STATESEPERATORINDEX_UTXO", 190), 
+    ("OP_STATESEPERATORINDEX_OUTPUT", 191), 
 
-    def connection_tuples(self):
-        '''Return a list of (kind, port, family) tuples to try when making a
-        connection.
-        '''
-        # Use a list not a set - it's important to try the registered
-        # ports first.
-        pairs = [('SSL', self.ssl_port), ('TCP', self.tcp_port)]
-        while self.other_port_pairs:
-            pairs.append(self.other_port_pairs.pop())
-        if isinstance(self.ip_address, IPv4Address):
-            families = [AF_INET]
-        elif isinstance(self.ip_address, IPv6Address):
-            families = [AF_INET6]
-        else:
-            families = [AF_INET, AF_INET6]
-        return [(kind, port, family)
-                for kind, port in pairs if port
-                for family in families]
+    ("OP_SHA512_256", 206), 
+    ("OP_HASH512_256", 207),
+    ("OP_PUSHINPUTREF", 208), 
+    ("OP_REQUIREINPUTREF", 209), 
+    ("OP_DISALLOWPUSHINPUTREF", 210),
+    ("OP_DISALLOWPUSHINPUTREFSIBLING", 211),
 
-    def mark_bad(self):
-        '''Mark as bad to avoid reconnects but also to remember for a
-        while.'''
-        self.bad = True
+    ("OP_REFHASHDATASUMMARY_UTXO", 212),
+    ("OP_REFHASHVALUESUM_UTXOS", 213),
+    ("OP_REFHASHDATASUMMARY_OUTPUT", 214),
+    ("OP_REFHASHVALUESUM_OUTPUTS", 215),
 
-    def check_ports(self, other):
-        '''Remember differing ports in case server operator changed them
-        or removed one.'''
-        if other.ssl_port != self.ssl_port:
-            self.other_port_pairs.add(('SSL', other.ssl_port))
-        if other.tcp_port != self.tcp_port:
-            self.other_port_pairs.add(('TCP', other.tcp_port))
-        return bool(self.other_port_pairs)
+    ("OP_PUSHINPUTREFSINGLETON", 216),
+    ("OP_REFTYPE_UTXO", 217),
+    ("OP_REFTYPE_OUTPUT", 218),
 
-    @cachedproperty
-    def is_tor(self):
-        return self.host.endswith('.onion')
+    ("OP_REFVALUESUM_UTXOS", 219),
+    ("OP_REFVALUESUM_OUTPUTS", 220),
+    ("OP_REFOUTPUTCOUNT_UTXOS", 221),
+    ("OP_REFOUTPUTCOUNT_OUTPUTS", 222),
+    ("OP_REFOUTPUTCOUNTZEROVALUED_UTXOS", 223),
+    ("OP_REFOUTPUTCOUNTZEROVALUED_OUTPUTS", 224),
+    ("OP_REFDATASUMMARY_UTXO", 225),
+    ("OP_REFDATASUMMARY_OUTPUT", 226),
 
-    @cachedproperty
-    def is_valid(self):
-        ip = self.ip_address
-        if ip:
-            return ((ip.is_global or ip.is_private)
-                    and not (ip.is_multicast or ip.is_unspecified))
-        return is_valid_hostname(self.host)
+    ("OP_CODESCRIPTHASHVALUESUM_UTXOS", 227),
+    ("OP_CODESCRIPTHASHVALUESUM_OUTPUTS", 228),
+    ("OP_CODESCRIPTHASHOUTPUTCOUNT_UTXOS", 229),
+    ("OP_CODESCRIPTHASHOUTPUTCOUNT_OUTPUTS", 230),
+    ("OP_CODESCRIPTHASHZEROVALUEDOUTPUTCOUNT_UTXOS", 231),
+    ("OP_CODESCRIPTHASHZEROVALUEDOUTPUTCOUNT_OUTPUTS", 232),
+    ("OP_CODESCRIPTBYTECODE_UTXO", 233),
+    ("OP_CODESCRIPTBYTECODE_OUTPUT", 234),
+    ("OP_STATESCRIPTBYTECODE_UTXO", 235),
+    ("OP_STATESCRIPTBYTECODE_OUTPUT", 236),
+    ("OP_PUSH_TX_STATE", 237)
+])
 
-    @cachedproperty
-    def is_public(self):
-        ip = self.ip_address
-        if ip:
-            return self.is_valid and not ip.is_private
-        else:
-            return self.is_valid and self.host != 'localhost'
+# Cached in hash set for improved parsing performance
+INPUT_REF_OPS = {
+    OpCodes.OP_PUSHINPUTREF,
+    OpCodes.OP_PUSHINPUTREFSINGLETON,
+    OpCodes.OP_REQUIREINPUTREF,
+    OpCodes.OP_DISALLOWPUSHINPUTREF,
+    OpCodes.OP_DISALLOWPUSHINPUTREFSIBLING,
+}
+PUSH_INPUT_REF_OPS = {
+    OpCodes.OP_PUSHINPUTREF,
+    OpCodes.OP_PUSHINPUTREFSINGLETON
+}
+CHECKSIG_OPS = {
+    OpCodes.OP_CHECKSIG,
+    OpCodes.OP_CHECKSIGVERIFY,
+    OpCodes.OP_CHECKMULTISIG,
+    OpCodes.OP_CHECKMULTISIGVERIFY
+}
 
-    @cachedproperty
-    def ip_address(self):
-        '''The host as a python ip_address object, or None.'''
-        try:
-            return ip_address(self.host)
-        except ValueError:
-            return None
 
-    def bucket_for_internal_purposes(self):
-        '''Used for keeping the internal peer list manageable in size.
-        Restrictions are loose.
-        '''
-        if self.is_tor:
-            return 'onion'
-        if not self.ip_addr:
-            return ''
-        ip_addr = ip_address(self.ip_addr)
-        if ip_addr.version == 4:
-            return str(ip_addr)
-        elif ip_addr.version == 6:
-            slash64 = IPv6Network(self.ip_addr).supernet(prefixlen_diff=128 - 64)
-            return str(slash64)
-        return ''
+# Paranoia to make it hard to create bad scripts
+assert OpCodes.OP_DUP == 0x76
+assert OpCodes.OP_HASH160 == 0xa9
+assert OpCodes.OP_EQUAL == 0x87
+assert OpCodes.OP_EQUALVERIFY == 0x88
+assert OpCodes.OP_CHECKSIG == 0xac
+assert OpCodes.OP_CHECKMULTISIG == 0xae
 
-    def bucket_for_external_interface(self):
-        '''Used when responding to RPC queries to return a distributed list
-        of peers. Restrictions are stricter than internal bucketing.
-        '''
-        if self.is_tor:
-            return 'onion'
-        if not self.ip_addr:
-            return ''
-        ip_addr = ip_address(self.ip_addr)
-        if ip_addr.version == 4:
-            slash16 = IPv4Network(self.ip_addr).supernet(prefixlen_diff=32 - 16)
-            return str(slash16)
-        elif ip_addr.version == 6:
-            slash56 = IPv6Network(self.ip_addr).supernet(prefixlen_diff=128 - 56)
-            return str(slash56)
-        return ''
+# Added for Radiant
+assert OpCodes.OP_CHECKDATASIG == 0xba
+assert OpCodes.OP_CHECKDATASIGVERIFY == 0xbb
+assert OpCodes.OP_REVERSEBYTES == 0xbc
+assert OpCodes.OP_STATESEPERATOR == 0xbd
+assert OpCodes.OP_STATESEPERATORINDEX_UTXO == 0xbe
+assert OpCodes.OP_STATESEPERATORINDEX_OUTPUT == 0xbf
 
-    def serialize(self):
-        '''Serialize to a dictionary.'''
-        return {attr: getattr(self, attr) for attr in self.ATTRS}
+assert OpCodes.OP_SHA512_256 == 0xce
+assert OpCodes.OP_HASH512_256 == 0xcf
+assert OpCodes.OP_PUSHINPUTREF == 0xd0
+assert OpCodes.OP_REQUIREINPUTREF == 0xd1
+assert OpCodes.OP_DISALLOWPUSHINPUTREF == 0xd2
+assert OpCodes.OP_DISALLOWPUSHINPUTREFSIBLING == 0xd3
+assert OpCodes.OP_REFHASHDATASUMMARY_UTXO == 0xd4
+assert OpCodes.OP_REFHASHVALUESUM_UTXOS == 0xd5
+assert OpCodes.OP_REFHASHDATASUMMARY_OUTPUT == 0xd6
+assert OpCodes.OP_REFHASHVALUESUM_OUTPUTS == 0xd7
+assert OpCodes.OP_PUSHINPUTREFSINGLETON == 0xd8
+assert OpCodes.OP_REFTYPE_UTXO == 0xd9
+assert OpCodes.OP_REFTYPE_OUTPUT == 0xda
+assert OpCodes.OP_REFVALUESUM_UTXOS == 0xdb
+assert OpCodes.OP_REFVALUESUM_OUTPUTS == 0xdc
+assert OpCodes.OP_REFOUTPUTCOUNT_UTXOS == 0xdd
+assert OpCodes.OP_REFOUTPUTCOUNT_OUTPUTS == 0xde
+assert OpCodes.OP_REFOUTPUTCOUNTZEROVALUED_UTXOS == 0xdf
+assert OpCodes.OP_REFOUTPUTCOUNTZEROVALUED_OUTPUTS == 0xe0
+assert OpCodes.OP_REFDATASUMMARY_UTXO == 0xe1
+assert OpCodes.OP_REFDATASUMMARY_OUTPUT == 0xe2
+assert OpCodes.OP_CODESCRIPTHASHVALUESUM_UTXOS == 0xe3
+assert OpCodes.OP_CODESCRIPTHASHVALUESUM_OUTPUTS == 0xe4
+assert OpCodes.OP_CODESCRIPTHASHOUTPUTCOUNT_UTXOS == 0xe5
+assert OpCodes.OP_CODESCRIPTHASHOUTPUTCOUNT_OUTPUTS == 0xe6
+assert OpCodes.OP_CODESCRIPTHASHZEROVALUEDOUTPUTCOUNT_UTXOS == 0xe7
+assert OpCodes.OP_CODESCRIPTHASHZEROVALUEDOUTPUTCOUNT_OUTPUTS == 0xe8
+assert OpCodes.OP_CODESCRIPTBYTECODE_UTXO == 0xe9
+assert OpCodes.OP_CODESCRIPTBYTECODE_OUTPUT == 0xea
+assert OpCodes.OP_STATESCRIPTBYTECODE_UTXO == 0xeb
+assert OpCodes.OP_STATESCRIPTBYTECODE_OUTPUT == 0xec
+assert OpCodes.OP_PUSH_TX_STATE == 0xed
 
-    def _port(self, key):
-        hosts = self.features.get('hosts')
-        if isinstance(hosts, dict):
-            host = hosts.get(self.host)
-            port = self._integer(key, host)
-            if port and 0 < port < 65536:
-                return port
-        return None
+def is_unspendable_legacy(script):
+    # OP_FALSE OP_RETURN or OP_RETURN
+    return script[:2] == b'\x00\x6a' or (script and script[0] == 0x6a)
 
-    def _integer(self, key, d=None):
-        d = d or self.features
-        result = d.get(key) if isinstance(d, dict) else None
-        if isinstance(result, str):
-            try:
-                result = int(result)
-            except ValueError:
-                pass
-        return result if isinstance(result, int) else None
 
-    def _string(self, key):
-        result = self.features.get(key)
-        return result if isinstance(result, str) else None
+def is_unspendable_genesis(script):
+    # OP_FALSE OP_RETURN
+    return script[:2] == b'\x00\x6a'
 
-    @cachedproperty
-    def genesis_hash(self):
-        '''Returns the network genesis block hash as a string if known, otherwise None.'''
-        return self._string('genesis_hash')
 
-    @cachedproperty
-    def ssl_port(self):
-        '''Returns None if no SSL port, otherwise the port as an integer.'''
-        return self._port('ssl_port')
-
-    @cachedproperty
-    def tcp_port(self):
-        '''Returns None if no TCP port, otherwise the port as an integer.'''
-        return self._port('tcp_port')
-
-    @cachedproperty
-    def server_version(self):
-        '''Returns the server version as a string if known, otherwise None.'''
-        return self._string('server_version')
-
-    @cachedproperty
-    def pruning(self):
-        '''Returns the pruning level as an integer.  None indicates no
-        pruning.'''
-        pruning = self._integer('pruning')
-        if pruning and pruning > 0:
-            return pruning
-        return None
-
-    def _protocol_version_string(self, key):
-        version_str = self.features.get(key)
-        ptuple = protocol_tuple(version_str)
-        return version_string(ptuple)
-
-    @cachedproperty
-    def protocol_min(self):
-        '''Minimum protocol version as a string, e.g., 1.0'''
-        return self._protocol_version_string('protocol_min')
-
-    @cachedproperty
-    def protocol_max(self):
-        '''Maximum protocol version as a string, e.g., 1.1'''
-        return self._protocol_version_string('protocol_max')
-
-    def to_tuple(self):
-        '''The tuple ((ip, host, details) expected in response
-        to a peers subscription.'''
-        details = self.real_name().split()[1:]
-        return (self.ip_addr or self.host, self.host, details)
-
-    def real_name(self):
-        '''Real name of this peer as used on IRC.'''
-        def port_text(letter, port):
-            if port == self.DEFAULT_PORTS.get(letter):
-                return letter
-            else:
-                return letter + str(port)
-
-        parts = [self.host, 'v' + self.protocol_max]
-        if self.pruning:
-            parts.append('p{:d}'.format(self.pruning))
-        for letter, port in (('s', self.ssl_port), ('t', self.tcp_port)):
-            if port:
-                parts.append(port_text(letter, port))
-        return ' '.join(parts)
-
-    @classmethod
-    def from_real_name(cls, real_name, source):
-        '''Real name is a real name as on IRC, such as
-
-            "erbium1.sytes.net v1.0 s t"
-
-        Returns an instance of this Peer class.
-        '''
-        host = 'nohost'
-        features = {}
-        ports = {}
-        for n, part in enumerate(real_name.split()):
-            if n == 0:
-                host = part
+def _match_ops(ops, pattern):
+    if len(ops) != len(pattern):
+        return False
+    for op, pop in zip(ops, pattern):
+        if pop != op:
+            # -1 means 'data push', whose op is an (op, data) tuple
+            if pop == -1 and isinstance(op, tuple):
                 continue
-            if part[0] in ('s', 't'):
-                if len(part) == 1:
-                    port = cls.DEFAULT_PORTS[part[0]]
-                else:
-                    port = part[1:]
-                if part[0] == 's':
-                    ports['ssl_port'] = port
-                else:
-                    ports['tcp_port'] = port
-            elif part[0] == 'v':
-                features['protocol_max'] = features['protocol_min'] = part[1:]
-            elif part[0] == 'p':
-                features['pruning'] = part[1:]
+            return False
 
-        features.update(ports)
-        features['hosts'] = {host: ports}
+    return True
 
-        return cls(host, features, source)
+
+class ScriptPubKey(object):
+    '''A class for handling a tx output script that gives conditions
+    necessary for spending.
+    '''
+
+    TO_ADDRESS_OPS = [OpCodes.OP_DUP, OpCodes.OP_HASH160, -1,
+                      OpCodes.OP_EQUALVERIFY, OpCodes.OP_CHECKSIG]
+    TO_P2SH_OPS = [OpCodes.OP_HASH160, -1, OpCodes.OP_EQUAL]
+    TO_PUBKEY_OPS = [-1, OpCodes.OP_CHECKSIG]
+
+    @classmethod
+    def P2SH_script(cls, hash160):
+        return (bytes([OpCodes.OP_HASH160])
+                + Script.push_data(hash160)
+                + bytes([OpCodes.OP_EQUAL]))
+
+    @classmethod
+    def P2PKH_script(cls, hash160):
+        return (bytes([OpCodes.OP_DUP, OpCodes.OP_HASH160])
+                + Script.push_data(hash160)
+                + bytes([OpCodes.OP_EQUALVERIFY, OpCodes.OP_CHECKSIG]))
+
+
+class Script(object):
+
+    @classmethod
+    def get_stateseperator_index(cls, script):
+        try:
+            n = 0
+            while n < len(script):
+                op = script[n]
+                # Found the state seperator
+                if op == OpCodes.OP_STATESEPERATOR:
+                    return n
+                
+                n += 1
+                if op <= OpCodes.OP_PUSHDATA4:
+                    # Raw bytes follow
+                    if op < OpCodes.OP_PUSHDATA1:
+                        dlen = op
+                    elif op == OpCodes.OP_PUSHDATA1:
+                        dlen = script[n]
+                        n += 1
+                    elif op == OpCodes.OP_PUSHDATA2:
+                        dlen, = unpack_le_uint16_from(script[n: n + 2])
+                        n += 2
+                    elif op == OpCodes.OP_PUSHDATA4:
+                        dlen, = unpack_le_uint32_from(script[n: n + 4])
+                        n += 4
+                    if n + dlen > len(script):
+                        raise IndexError
+                    n += dlen 
+
+                elif op == OpCodes.OP_PUSHINPUTREF or op == OpCodes.OP_REQUIREINPUTREF or op == OpCodes.OP_DISALLOWPUSHINPUTREF or op == OpCodes.OP_DISALLOWPUSHINPUTREFSIBLING or op == OpCodes.OP_PUSHINPUTREFSINGLETON:
+                    dlen = 36 # Grab 36 bytes for the hash
+                    if n + dlen > len(script):
+                        raise IndexError
+                    n += dlen 
+
+        except Exception as e:
+            print(f'e {e}')
+            raise ScriptError('truncated script') from None
+        # No state seperator found
+        return 0
+
+    @classmethod
+    def get_ops(cls, script):
+        ops = []
+
+        # The unpacks or script[n] below throw on truncated scripts
+        try:
+            n = 0
+            dlen = 0
+            while n < len(script):
+                op = script[n]
+                n += 1
+
+                if op <= OpCodes.OP_PUSHDATA4:
+                    # Raw bytes follow
+                    if op < OpCodes.OP_PUSHDATA1:
+                        dlen = op
+                    elif op == OpCodes.OP_PUSHDATA1:
+                        dlen = script[n]
+                        n += 1
+                    elif op == OpCodes.OP_PUSHDATA2:
+                        dlen, = unpack_le_uint16_from(script[n: n + 2])
+                        n += 2
+                    elif op == OpCodes.OP_PUSHDATA4:
+                        dlen, = unpack_le_uint32_from(script[n: n + 4])
+                        n += 4
+
+                    if n + dlen > len(script):
+                        raise IndexError
+
+                    op = (op, script[n:n + dlen])
+                    n += dlen
+
+                elif op in INPUT_REF_OPS:
+                    dlen = 36  # Grab 36 bytes for the hash
+
+                    if n + dlen > len(script):
+                        raise IndexError
+                    n += dlen 
+
+                op = (op, script[n:n + dlen])
+                ops.append(op)
+        except Exception:
+            # Truncated script; e.g. tx_hash
+            # ebc9fa1196a59e192352d76c0f6e73167046b9d37b8302b6bb6968dfd279b767
+            raise ScriptError('truncated script') from None
+
+        return ops
+    # Saves the push input refs of a script in the order they were encountered
+    @classmethod
+    def get_push_input_refs(cls, script):
+        all_refs = []
+        normal_refs = []
+        singleton_refs = []
+
+        # The unpacks or script[n] below throw on truncated scripts
+        try:
+            n = 0
+            dlen = 0
+            while n < len(script):
+                op = script[n]
+                n += 1
+
+                if op <= OpCodes.OP_PUSHDATA4:
+                    # Raw bytes follow
+                    if op < OpCodes.OP_PUSHDATA1:
+                        dlen = op
+                    elif op == OpCodes.OP_PUSHDATA1:
+                        dlen = script[n]
+                        n += 1
+                    elif op == OpCodes.OP_PUSHDATA2:
+                        dlen, = unpack_le_uint16_from(script[n: n + 2])
+                        n += 2
+                    elif op == OpCodes.OP_PUSHDATA4:
+                        dlen, = unpack_le_uint32_from(script[n: n + 4])
+                        n += 4
+
+                    if n + dlen > len(script):
+                        raise IndexError
+
+                    n += dlen
+
+                elif op in INPUT_REF_OPS:
+                    dlen = 36  # Grab 36 bytes
+
+                    if op == OpCodes.OP_PUSHINPUTREF:
+                        ref = script[n:n + dlen]
+                        all_refs.append(ref)
+                        normal_refs.append(ref)
+                    elif op == OpCodes.OP_PUSHINPUTREFSINGLETON:
+                        ref = script[n:n + dlen]
+                        all_refs.append(ref)
+                        singleton_refs.append(ref)
+
+                    if n + dlen > len(script):
+                        raise IndexError
+
+                    n += dlen
+
+        except Exception as e:
+            raise ScriptError('get_push_input_refs script') from None
+
+        return all_refs, normal_refs, singleton_refs
+    
+    @classmethod 
+    def dedup_refs(cls, refs_list):
+        dedup = {}
+        for ref in refs_list: 
+            dedup[ref] = ref
+        return dedup
+
+
+    @classmethod
+    def zero_refs(cls, script):
+        ops = bytearray()
+        requires_sig = False
+
+        # The unpacks or script[n] below throw on truncated scripts
+        try:
+            n = 0
+            dlen = 0
+            while n < len(script):
+                op = script[n]
+                ops.append(op)
+                n += 1
+
+                # Refs are only zeroed when a check sig opcode is used
+                if op in CHECKSIG_OPS:
+                    requires_sig = True
+
+                elif op <= OpCodes.OP_PUSHDATA4:
+                    # Raw bytes follow
+                    if op < OpCodes.OP_PUSHDATA1:
+                        dlen = op
+                    elif op == OpCodes.OP_PUSHDATA1:
+                        dlen = script[n]
+                        n += 1
+                    elif op == OpCodes.OP_PUSHDATA2:
+                        dlen, = unpack_le_uint16_from(script[n: n + 2])
+                        n += 2
+                    elif op == OpCodes.OP_PUSHDATA4:
+                        dlen, = unpack_le_uint32_from(script[n: n + 4])
+                        n += 4
+                    if n + dlen > len(script):
+                        raise IndexError
+
+                    ops.extend(script[n:n + dlen])
+                    n += dlen
+
+                elif op in INPUT_REF_OPS:
+                    dlen = 36  # Grab 36 bytes
+
+                    if n + dlen > len(script):
+                        raise IndexError
+
+                    ops.extend(bytes(36))
+                    n += dlen
+
+        except Exception:
+            # Truncated script; e.g. tx_hash
+            # ebc9fa1196a59e192352d76c0f6e73167046b9d37b8302b6bb6968dfd279b767
+            raise ScriptError('truncated script') from None
+
+        if requires_sig:
+            return bytes(ops)
+        return script
+
+    @classmethod
+    def push_data(cls, data):
+        '''Returns the opcodes to push the data on the stack.'''
+        assert isinstance(data, (bytes, bytearray))
+
+        n = len(data)
+        if n < OpCodes.OP_PUSHDATA1:
+            return bytes([n]) + data
+        if n < 256:
+            return bytes([OpCodes.OP_PUSHDATA1, n]) + data
+        if n < 65536:
+            return bytes([OpCodes.OP_PUSHDATA2]) + pack_le_uint16(n) + data
+        return bytes([OpCodes.OP_PUSHDATA4]) + pack_le_uint32(n) + data
+
+    @classmethod
+    def opcode_name(cls, opcode):
+        if OpCodes.OP_0 < opcode < OpCodes.OP_PUSHDATA1:
+            return 'OP_{:d}'.format(opcode)
+        try:
+            return OpCodes.whatis(opcode)
+        except KeyError:
+            return 'OP_UNKNOWN:{:d}'.format(opcode)
+
+    @classmethod
+    def dump(cls, script):
+        opcodes, datas = cls.get_ops(script)
+        for opcode, data in zip(opcodes, datas):
+            name = cls.opcode_name(opcode)
+            if data is None:
+                print(name)
+            else:
+                print('{} {} ({:d} bytes)'
+                      .format(name, data.hex(), len(data)))
