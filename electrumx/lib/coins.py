@@ -306,9 +306,9 @@ class RadiantScalingTestnet(RadiantTestnet):
     PEERS = [
         'stn-electrumx.radiant4people.com t51001 s51002',
     ]
-    CHAIN_SIZE = 20_000
-    CHAIN_SIZE_HEIGHT = 100
-    AVG_BLOCK_SIZE = 2_000_000_000
+    TX_COUNT = 1000
+    TX_COUNT_HEIGHT = 1000
+    TX_PER_BLOCK = 5000
     GENESIS_ACTIVATION = 0
 
     @classmethod
@@ -321,9 +321,8 @@ class RadiantRegtest(RadiantTestnet):
     GENESIS_HASH = ('000000002008a2f4a76b850a838ae084'
                     '994c200dc2fd354f73102298fe063a91')
     PEERS = []
-    CHAIN_SIZE = 20_000
-    CHAIN_SIZE_HEIGHT = 100
-    AVG_BLOCK_SIZE = 1_000_000
+    TX_COUNT = 1
+    TX_COUNT_HEIGHT = 1
     GENESIS_ACTIVATION = 0
 
 
