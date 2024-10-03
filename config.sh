@@ -17,7 +17,6 @@ export REQUEST_TIMEOUT=60
 export DB_DIRECTORY=/Users/username/git/electrumdb
 export DB_ENGINE=leveldb
 export SERVICES=tcp://0.0.0.0:50010,ws://0.0.0.0:50020 #,wss://0.0.0.0:50022
-export HOST=""
 export ALLOW_ROOT=true
 export CACHE_MB=300
 export MAX_SEND=7000000
@@ -27,4 +26,3 @@ export MAX_RECV=7000000
 # export CPATH="$CPATH:$(brew --prefix)/include"
 
 python electrumx_server
-

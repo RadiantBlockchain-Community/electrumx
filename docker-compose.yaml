@@ -1,0 +1,31 @@
+version: "3"
+services:
+  electrumx:
+    build:
+      context: .
+      dockerfile: ./contrib/radiant/Dockerfile
+    container_name: electrumx_server
+    ports:
+      - "50010:50010"   # Port for TCP connections
+      - "50012:50012"   # Port for SSL connections
+    cap_add:
+      - SYS_PTRACE
+    environment:
+      - DAEMON_URL=${DAEMON_URL}
+      - COIN=${COIN}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT}
+      - DB_DIRECTORY=${DB_DIRECTORY}
+      - DB_ENGINE=${DB_ENGINE}
+      - SERVICES=${SERVICES}
+      - SSL_CERTFILE=${SSL_CERTFILE}
+      - SSL_KEYFILE=${SSL_KEYFILE}
+      - ALLOW_ROOT=${ALLOW_ROOT}
+      - CACHE_MB=${CACHE_MB}
+      - MAX_SESSIONS=${MAX_SESSIONS}
+      - MAX_SEND=${MAX_SEND}
+      - MAX_RECV=${MAX_RECV}
+    network_mode: "host"
+    stop_grace_period: 120s
+    volumes:
+      - ./electrumdb:/root/electrumdb   # Mount local directory for database and SSL keys
+    entrypoint: ["python3", "electrumx_server"]
