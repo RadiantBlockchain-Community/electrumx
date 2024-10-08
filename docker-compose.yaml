@@ -13,6 +13,7 @@ services:
     environment:
       - DAEMON_URL=${DAEMON_URL}
       - COIN=${COIN}
+      - NET=${NET}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT}
       - DB_DIRECTORY=${DB_DIRECTORY}
       - DB_ENGINE=${DB_ENGINE}

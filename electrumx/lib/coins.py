@@ -264,9 +264,10 @@ class RadiantScalingTestnet(RadiantTestnet):
         return 3
 
 class RadiantRegtest(RadiantTestnet):
+    NAME = "RadiantRegtest"
     NET = "regtest"
-    GENESIS_HASH = ('000000002008a2f4a76b850a838ae084'
-                    '994c200dc2fd354f73102298fe063a91')
+    GENESIS_HASH = ('0043dd38bd3e58f3af0fece66c3ab63d'
+                    'bfb7835a807525643d2f5548366f91c0')
     PEERS = []
     TX_COUNT = 1
     TX_COUNT_HEIGHT = 1

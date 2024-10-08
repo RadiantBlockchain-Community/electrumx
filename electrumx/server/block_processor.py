@@ -192,6 +192,9 @@ class BlockProcessor:
         # UTXO cache
         self.utxo_cache = {}
         self.ref_cache = {}
+        self.ref_mint_cache = {}
+        self.ref_loc_cache = {}
+        self.ref_loc_undo_infos = []
         self.data_cache = {}
         self.db_deletes = []
 
@@ -308,7 +311,7 @@ class BlockProcessor:
         '''The data for a flush.  The lock must be taken.'''
         assert self.state_lock.locked()
         return FlushData(self.height, self.tx_count, self.headers,
-                         self.tx_hashes, self.undo_infos, self.utxo_cache, self.ref_cache, self.data_cache,
+                         self.tx_hashes, self.undo_infos, self.ref_loc_undo_infos, self.utxo_cache, self.ref_cache, self.ref_mint_cache, self.ref_loc_cache, self.data_cache,
                          self.db_deletes, self.tip)
 
     async def flush(self, flush_utxos):
@@ -381,9 +384,10 @@ class BlockProcessor:
         height = self.height + 1
 
         is_unspendable = is_unspendable_legacy
-        undo_info = self.advance_txs(block.transactions, is_unspendable)
+        undo_info, ref_loc_undo_info = self.advance_txs(block.transactions, is_unspendable)
         if height >= min_height:
             self.undo_infos.append((undo_info, height))
+            self.ref_loc_undo_infos.append((ref_loc_undo_info, height))
             self.db.write_raw_block(block.raw, height)
 
         self.height = height
@@ -397,11 +401,15 @@ class BlockProcessor:
 
         # Use local vars for speed in the loops
         undo_info = []
+        ref_loc_undo = {}
         tx_num = self.tx_count
         script_hashX = self.coin.hashX_from_script
         script_codeScriptHash = self.coin.codeScriptHash_from_script
         put_utxo = self.utxo_cache.__setitem__
         put_refs = self.ref_cache.__setitem__
+        put_ref_mint = self.ref_mint_cache.__setitem__
+        put_ref_loc = self.ref_loc_cache.__setitem__
+        set_ref_loc_undo = ref_loc_undo.__setitem__
         put_data = self.data_cache.__setitem__
         spend_utxo = self.spend_utxo
         undo_info_append = undo_info.append
@@ -410,11 +418,14 @@ class BlockProcessor:
         append_hashXs = hashXs_by_tx.append
         to_le_uint32 = pack_le_uint32
         to_le_uint64 = pack_le_uint64
+        mints = set()
 
         for tx, tx_hash in txs:
             hashXs = []
             append_hashX = hashXs.append
             tx_numb = to_le_uint64(tx_num)[:5]
+            refs = []
+            append_ref = refs.append
 
             # Spend the inputs
             for txin in tx.inputs:
@@ -435,8 +446,8 @@ class BlockProcessor:
                 hashX = script_hashX(zero_refs)
                 codeScriptHash = script_codeScriptHash(txout.pk_script)
                 append_hashX(hashX)
-                put_utxo(tx_hash + to_le_uint32(idx),
-                         hashX + codeScriptHash + tx_numb + to_le_uint64(txout.value))
+                cache_key = tx_hash + to_le_uint32(idx)
+                put_utxo(cache_key, hashX + codeScriptHash + tx_numb + to_le_uint64(txout.value))
 
                 all_refs, normal_refs, singleton_refs = Script.get_push_input_refs(txout.pk_script)
                 all_refs_dedup = Script.dedup_refs(all_refs)
@@ -454,21 +465,38 @@ class BlockProcessor:
                 
                 # Save the refs for the outpoint
                 if len(refs_value):
-                    put_refs(tx_hash + to_le_uint32(idx), refs_value) 
+                    put_refs(cache_key, refs_value)
                  
-                # Track history singleton refs
-                ref_hashes = [script_hashX(ref) for ref in singleton_refs_dedup.keys()]
-                for ref_hash in ref_hashes:
-                    append_hashX(ref_hash)
+                for ref in singleton_refs_dedup.keys():
+                    if any(txin.prev_hash == ref[:32] and to_le_uint32(txin.prev_idx) == ref[32:] for txin in tx.inputs):
+                        # Track singleton ref mints
+                        mints.add(ref)
+                        put_ref_mint(ref, tx_hash)
+                    else:
+                        # Track location of singleton refs
+                        put_ref_loc(ref, tx_hash)
 
-                # Track history normal refs
+                        # Save previous block's ref location if it isn't already, and ref wasn't minted this block
+                        if ref not in mints and ref not in ref_loc_undo:
+                            cur_loc = self.db.utxo_db.get(b'rl' + ref)
+                            if cur_loc:
+                                set_ref_loc_undo(ref, cur_loc)
+
+                    append_ref(ref)
+
+                # Track normal ref mints
+                # Location for normal refs are not tracked
                 for ref in normal_refs_dedup.keys():
-                    for txin in tx.inputs:
-                        if txin.prev_hash == ref[:32] and to_le_uint32(txin.prev_idx) == ref[32:]:
-                            append_hashX(script_hashX(ref))
+                    if any(txin.prev_hash == ref[:32] and to_le_uint32(txin.prev_idx) == ref[32:] for txin in tx.inputs):
+                        put_ref_mint(ref, tx_hash)
+                        append_ref(ref)
+
+                # We could check for refs used in inputs that are burnt in this tx,
+                # but current burn implementations are done using op return so this may not be needed
 
             append_hashXs(hashXs)
             update_touched(hashXs)
+            update_touched(refs)
             tx_num += 1
 
         self.db.history.add_unflushed(hashXs_by_tx, self.tx_count)
@@ -476,7 +504,13 @@ class BlockProcessor:
         self.tx_count = tx_num
         self.db.tx_counts.append(tx_num)
 
-        return undo_info
+        # Convert undo ref locations from dict to an array of bytes
+        ref_loc_undo_info = []
+        ref_loc_undo_info_append = ref_loc_undo_info.append
+        for ref, loc in ref_loc_undo.items():
+            ref_loc_undo_info.append(ref + loc)
+
+        return undo_info, ref_loc_undo_info
 
     async def _backup_block(self, raw_block):
         '''Backup the raw block and flush.
@@ -511,13 +545,15 @@ class BlockProcessor:
         # Prevout values, in order down the block (coinbase first if present)
         # undo_info is in reverse block order
         undo_info = self.db.read_undo_info(self.height)
-        if undo_info is None:
+        ref_loc_undo_info = self.db.read_ref_loc_undo_info(self.height)
+        if undo_info is None or ref_loc_undo_info is None:
             raise ChainError('no undo information found for height {:,d}'
                              .format(self.height))
         n = len(undo_info)
 
         # Use local vars for speed in the loops
         put_utxo = self.utxo_cache.__setitem__
+        put_ref_loc = self.ref_loc_cache.__setitem__
         spend_utxo = self.spend_utxo
         touched = self.touched
         undo_entry_len = 13 + HASHX_LEN + 32 # 32 added for codScriptHash
@@ -536,16 +572,30 @@ class BlockProcessor:
                 # Delete any refs for outpoint
                 self.delete_potential_refs(tx_hash, idx)
 
-                normal_refs, singleton_refs = Script.get_push_input_refs(txout.pk_script)[1:]
-                # Add history for all singleton refs
-                for ref_hash in singleton_refs:
-                    touched.add(script_hashX(ref_hash))
+                all_refs, _, _ = Script.get_push_input_refs(txout.pk_script)
+                all_refs_dedup = Script.dedup_refs(all_refs)
 
-                # Add history for all normal refs
-                for ref in normal_refs:
-                    for txin in tx.inputs:
-                        if txin.prev_hash == ref[:32] and to_le_uint32(txin.prev_idx) == ref[32:]:
-                            touched(script_hashX(ref))
+                for ref in all_refs_dedup.keys():
+                    touched.add(script_hashX(ref))
+                    if any(txin.prev_hash == ref[:32] and to_le_uint32(txin.prev_idx) == ref[32:] for txin in tx.inputs):
+                        mints.add(ref)
+                        # Delete mint
+                        cached_value = self.ref_mint_cache.pop(ref, None)
+                        rm_db_key = b'rm' + ref
+                        rm_db_value = self.db.utxo_db.get(rm_db_key)
+                        if cached_value and rm_db_value:
+                            raise IndexError(f'Critical Error: Found ref mint in cache and DB')
+                        if rm_db_value:
+                            self.db_deletes.append(rm_db_key)
+                    else:
+                        # Delete location. This will be recreated later from undo data if it existed before this block.
+                        cached_value = self.ref_loc_cache.pop(ref, None)
+                        rl_db_key = b'rl' + ref
+                        rl_db_value = self.db.utxo_db.get(rl_db_key)
+                        if cached_value and rl_db_value:
+                            raise IndexError(f'Critical Error: Found ref location in cache and DB')
+                        if rl_db_value:
+                            self.db_deletes.append(rl_db_key)
 
             # Restore the inputs
             for txin in reversed(tx.inputs):
@@ -555,6 +605,13 @@ class BlockProcessor:
                 undo_item = undo_info[n:n + undo_entry_len]
                 put_utxo(txin.prev_hash + pack_le_uint32(txin.prev_idx), undo_item)
                 touched.add(undo_item[:HASHX_LEN])
+
+        # Restore previous ref locations
+        for i in range(0, len(ref_loc_undo_info), 68):
+            chunk = ref_loc_undo_info[i:i + 68]
+            ref = chunk[:36]
+            loc = chunk[36:]
+            put_ref_loc(ref, loc)
 
         assert n == 0
         self.tx_count -= len(txs)
@@ -616,7 +673,18 @@ class BlockProcessor:
     To this end we maintain additional 'tables", one for each point above:
 
         1. Key: b'cu' + codeScriptHash + tx_idx + tx_num
-          Value: the UTXO value as a 64-bit unsigned integer
+           Value: the UTXO value as a 64-bit unsigned integer
+
+        2. Key: b'rm' + ref_hash
+           Value: ref_mint_txid
+
+        3. Key: b'rl' + ref_hash
+           Value: ref_location_txid
+
+        4. Key: b'ri' + tx_hash + tx_idx
+           Value: ref + ref + ...
+    
+
 
     The compressed tx hash is just the first few bytes of the hash of
     the tx in which the UTXO was created.  As this is not unique there

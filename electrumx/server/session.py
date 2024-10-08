@@ -150,9 +150,9 @@ class SessionManager:
         self._history_cache = pylru.lrucache(1000)
         self._history_lookups = 0
         self._history_hits = 0
-        self._first_last_history_cache = pylru.lrucache(1000)
-        self._first_last_history_lookups = 0
-        self._first_last_history_hits = 0
+        self._ref_get_cache = pylru.lrucache(1000)
+        self._ref_get_lookups = 0
+        self._ref_get_hits = 0
         self._tx_hashes_cache = pylru.lrucache(1000)
         self._tx_hashes_lookups = 0
         self._tx_hashes_hits = 0
@@ -861,19 +861,19 @@ class SessionManager:
             raise result
         return result, cost
 
-    async def first_last_history(self, hashX):
-        '''Returns the first and last history entries for a hashX'''
+    async def ref_get_db(self, ref):
+        '''Returns the mint and location for a ref'''
         cost = 0.1
-        self._first_last_history_lookups += 1
+        self._ref_get_lookups += 1
         try:
-            result = self._first_last_history_cache[hashX]
-            self._first_last_history_hits += 1
+            result = self._ref_get_cache[ref]
+            self._ref_get_hits += 1
         except KeyError:
-            first = await self.db.limited_history(hashX, limit=1)
-            last = await self.db.limited_history(hashX, limit=1, reverse=True)
+            mint = self.db.get_ref_mint(ref)
+            loc = self.db.get_ref_location(ref)
             cost += 0.202
-            result = first + last
-            self._first_last_history_cache[hashX] = result
+            result = [mint, loc]
+            self._ref_get_cache[ref] = result
 
         if isinstance(result, Exception):
             raise result
@@ -888,7 +888,7 @@ class SessionManager:
             cache = self._history_cache
             for hashX in set(cache).intersection(touched):
                 del cache[hashX]
-            cache = self._first_last_history_cache
+            cache = self._ref_get_cache
             for hashX in set(cache).intersection(touched):
                 del cache[hashX]
 
@@ -1042,6 +1042,7 @@ class ElectrumX(SessionBase):
         self.subscribe_headers = False
         self.connection.max_response_size = self.env.max_send
         self.hashX_subs = {}
+        self.ref_subs = {}
         self.sv_seen = False
         self.mempool_statuses = {}
         self.set_request_handlers(self.PROTOCOL_MIN)
@@ -1096,7 +1097,7 @@ class ElectrumX(SessionBase):
         self.logger.info(f"closing session over res usage. ip: {ip_addr}. groups: {group_names}")
 
     def sub_count(self):
-        return len(self.hashX_subs)
+        return len(self.hashX_subs) + len(self.ref_subs)
 
     def unsubscribe_hashX(self, hashX):
         self.mempool_statuses.pop(hashX, None)
@@ -1527,18 +1528,31 @@ class ElectrumX(SessionBase):
         '''Return the first and last transactions for a singleton ref or a normal ref mint'''
         ref = assert_ref(ref)
         ref_hash = self.env.coin.hashX_from_script(ref)
-        history, cost = await self.session_mgr.first_last_history(ref_hash)
+        db_values, cost = await self.session_mgr.ref_get_db(ref)
+        mempool_values = await self.mempool.first_last_summaries(ref_hash)
+
+        all_values = []
+        for value in db_values:
+            if value is not None:
+                all_values.append(value)
+
+        for value in mempool_values:
+            all_values.append(value.hash)
+
+        if len(all_values) == 0:
+            return []
+        
+        if len(all_values) == 1:
+            all_values.append(all_values[0])
+        
+        mint_loc = [all_values[0], all_values[-1]]
+
         self.bump_cost(cost)
-        conf = [{'tx_hash': hash_to_hex_str(tx_hash), 'height': height}
-                for tx_hash, height in history]
+        objects = [{'tx_hash': hash_to_hex_str(tx_hash)}
+                for tx_hash in mint_loc]
+        self.bump_cost(0.25 + len(mempool_values) / 50)
 
-        unconf = [{'tx_hash': hash_to_hex_str(tx.hash),
-                   'height': -tx.has_unconfirmed_inputs,
-                   'fee': tx.fee}
-                  for tx in await self.mempool.first_last_summaries(ref_hash)]
-        self.bump_cost(0.25 + len(unconf) / 50)
-
-        return conf + unconf
+        return objects
     async def transaction_id_from_pos(self, height, tx_pos, merkle=False):
         '''Return the txid and optionally a merkle proof, given
         a block height and position in the block.

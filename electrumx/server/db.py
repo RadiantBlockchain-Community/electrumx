@@ -45,8 +45,11 @@ class FlushData(object):
     block_tx_hashes = attr.ib()
     # The following are flushed to the UTXO DB if undo_infos is not None
     undo_infos = attr.ib()
+    ref_loc_undo_infos = attr.ib()
     adds = attr.ib()
     ref_adds = attr.ib()
+    ref_mints = attr.ib()
+    ref_locs = attr.ib()
     data_adds = attr.ib()
     deletes = attr.ib()
     tip = attr.ib()
@@ -307,6 +310,16 @@ class DB(object):
             batch_put(b'ri' + key, value)
         flush_data.ref_adds.clear()
 
+        # Ref mints
+        for key, value in flush_data.ref_mints.items():
+            batch_put(b'rm' + key, value)
+        flush_data.ref_mints.clear()
+
+        # Ref locations
+        for key, value in flush_data.ref_locs.items():
+            batch_put(b'rl' + key, value)
+        flush_data.ref_locs.clear()
+
         # New data
         batch_put = batch.put
         for key, value in flush_data.data_adds.items():
@@ -316,6 +329,9 @@ class DB(object):
         # New undo information
         self.flush_undo_infos(batch_put, flush_data.undo_infos)
         flush_data.undo_infos.clear()
+
+        self.flush_ref_loc_undo_infos(batch_put, flush_data.ref_loc_undo_infos)
+        flush_data.ref_loc_undo_infos.clear()
 
         if self.utxo_db.for_sync:
             block_count = flush_data.height - self.db_height
@@ -480,6 +496,19 @@ class DB(object):
         '''undo_infos is a list of (undo_info, height) pairs.'''
         for undo_info, height in undo_infos:
             batch_put(self.undo_key(height), b''.join(undo_info))
+
+    def ref_loc_undo_key(self, height):
+        '''DB key for undo information at the given height.'''
+        return b'RU' + pack_be_uint32(height)
+
+    def read_ref_loc_undo_info(self, height):
+        '''Read undo information from a file for the current height.'''
+        return self.utxo_db.get(self.undo_key(height))
+
+    def flush_ref_loc_undo_infos(self, batch_put, undo_infos):
+        '''undo_infos is a list of (undo_info, height) pairs.'''
+        for undo_info, height in undo_infos:
+            batch_put(self.ref_loc_undo_key(height), b''.join(undo_info))
 
     def raw_block_prefix(self):
         return 'meta/block'
@@ -794,6 +823,14 @@ class DB(object):
     def outpoint_to_str(self, outpoint):
         num, = unpack_le_uint32_from(outpoint[32:])
         return f'{hash_to_hex_str(outpoint[:32])}i{num}'
+
+    def get_ref_mint(self, ref):
+        key = b'rm' + ref
+        return self.utxo_db.get(key)
+
+    def get_ref_location(self, ref):
+        key = b'rl' + ref
+        return self.utxo_db.get(key)
 
     def get_refs_by_outpoint(self, outpoint): 
         refs = []
